@@ -1,0 +1,195 @@
+Final Project - Intro to R - Jeffrey Yim
+
+I will be using my own data that I obtained in a retrospective study of patients undergoing echocardiography (cardiac ultrasound) and right heart cath (invasive measurements of pressures in your pulmonary arteries, blood vessels supplying the lung.) My goal was to see whether non-invasive measurements of using cardiac ultrasound (RVFWSL) is correlated with invasive measurements using right heart cath (mean pulmonary pressures)
+
+
+
+```{r}
+#loading the necessary libraries
+library(tidyverse)
+library(haven)
+library(here)
+library(janitor)
+library(gtsummary)
+```
+
+```{r}
+data <- read_dta(here::here("data", "strain.dta")) #reading in my data as 'data' variable using here::here, which construct file paths with reference to the top directory holding my .Rproj file.
+
+```
+
+```{r}
+data <- data %>% #I am taking my data object and using pipe operator to overwrite the data with the result
+  mutate(rhcheight_meter = as.numeric(rhcheight) / 100) %>% #create a new variable of height in meters
+  mutate(bmi = (as.numeric(rhcweight)/rhcheight_meter^2)) #create a new variable of BMI
+
+bmi_summary <- data %>% #creating a new variable to summarize bmi
+  group_by(sex) %>% #separating the bmi by sex
+  summarize(avg_bmi = mean(bmi, na.rm = TRUE)) #getting the mean BMI while ignoring missing value 
+
+bmi_summary 
+```
+
+```{r}
+data <- data %>% 
+  filter(!is.na(rhcheight)) %>%  #Filter out those with missing height
+  filter(!is.na(rhcweight)) %>% #Filter out those with missing weight
+  mutate(bsa=(sqrt(as.numeric(rhcheight)*as.numeric(rhcweight)/3600))) #create a new variable of BSA. used as.numeric as my data was from stata and kept using another label
+
+summary(data$age)
+
+data <- data %>% 
+  mutate(age_fct = case_when( #Creating age_fct variable to categorize into factors
+    age <35 ~ 1,
+    age >= 35 & age < 50 ~ 2,
+    age >= 50 & age < 70 ~ 3,
+    age >= 70 ~ 4
+    ))
+
+data <- data %>% 
+  mutate(
+    age_cat = factor(
+      age_fct, 
+      levels = c(1, 2, 3, 4), #assigning levels
+      labels = c("Young", "Young-middle", "Old-middle", "Old") #labels to each factor
+    ),
+    age_cat = fct_relevel(age_cat, "Young", "Young-middle", "Old-middle", "Old"),#relevel to order from youngest -> oldest
+    age_cat = fct_recode( #recode labels
+      age_cat, 
+      "<35 (years)" = "Young",
+      "35-49 (years)" = "Young-middle",
+      "50-69 (years)" = "Old-middle",
+      ">70 (years)" = "Old"
+    )
+  )
+
+
+summary(data$age_cat) #taking a look at the summary
+
+data_clean <- data %>% 
+  filter(
+    is.finite(rvfwsl),          # Keeps only finite values, i got a warning saying there were 'non-finite' values outside scale range when trying to run on data
+    is.finite(preavrtmpap))
+
+bsa_summary <- data %>% 
+  summarize(avg_bsa = mean(bsa, na.rm = TRUE), .by = age_cat ) #summarizing the BSA by age category, ignoring missing
+
+bsa_summary
+
+data |> 
+  tabyl(sex, age_cat) |> #making a table using tabyl function with sex and age_cat varialbes
+  adorn_percentages() |> #add on percentages
+  adorn_pct_formatting() #change formatting to make it %
+
+table_data <- data %>% #storing new variable to create data on select variables
+  filter(age >=18, !is.na(bmi) & bmi >0, !is.na(preavrtmpap)) %>%  # Age criteria & valid BMI values
+  select(sex, age, age_cat, bmi, bsa, ends_with("SL"), mpap20, preavrtmpap) #using select and select helper
+```
+
+Going to create the table 1
+
+```{r}
+table1 <- table_data %>% 
+  tbl_summary(
+    by = sex, #stratify by sex
+    label = list(
+      age_cat ~ "Age Category", #re-label the categories
+      bmi ~ "Body Mass Index",
+      bsa ~ "Body Surface Area",
+      rvfwsl ~ "RV Free Wall Strain",
+      rv4csl ~ "RV Four Chamber Strain",
+      mpap20 ~ "Pulmonary Hypertension",
+      preavrtmpap ~ "Mean PA Pressures (mmHg)"
+    )
+  ) %>% 
+  add_p(test = list( #adding p-values 
+    all_continuous() ~ "t.test", 
+    all_categorical() ~ "fisher.test")) %>% 
+  add_overall() %>%  #add overall numbers
+  bold_labels() %>%  #bold the labels
+  modify_caption("**Patient Characteristics**") #add a title
+
+
+table1 #print the table
+gtsummary::as_gt(table1) %>% gt::gtsave(here("figures", "table 1.pdf")) #save the table as a pdf
+```
+
+Creating regression models
+
+```{r}
+linear_model <- lm(preavrtmpap ~ rvfwsl, data = data_clean) #creating linear regression model using mpap and rvfwsl
+summary(linear_model) #print summary
+
+library(broom)
+tidy(linear_model) #helps tidy models
+```
+
+Creating 3 figures
+
+```{r}
+# Plot 1: Boxplot of Pulmonary Pressures by Sex
+ggplot(data_clean, aes(x = sex, y = preavrtmpap, fill = sex)) +  # Set up plot with x as sex, y as pa pressures (preavrtmpap, fill by sex
+  geom_boxplot() +  # Add boxplots
+  labs(
+    title = "Distribution of Pulmonary Pressures by Sex",  # Set plot title
+    x = "Sex",  # Label for x-axis
+    y = "Pulmonary Pressures (mmHg)"  # Label for y-axis
+  ) +
+  theme_minimal() +  # Use a clean, minimal theme
+  theme(
+    legend.position = "none", # Remove the legend (sex is already on x-axis)
+    plot.title = element_text(hjust = 0.5, face = "bold"))  # Center and bold title
+
+
+ggsave(here("figures", "Figure 1.pdf")) #saving it as Figure 1
+```
+
+```{r}
+# Plot 2: Histogram of PH
+ggplot(data_clean, aes(x = age_cat, fill = factor(mpap20))) + #create ggplot using factor of the mpap20 variable as the fill
+  geom_bar(position = "stack") +  # Shows counts 
+  facet_grid(cols = vars(sex)) +  # Splits by sex
+  labs(
+    title = "Distribution of Pulmonary Hypertension by Age and Sex", # Set plot title
+    x = "Age Category", # Set x-axis title
+    y = "Number of Pulmonary Hypertension",  # Set y-axis title
+    fill = "Pulmonary Hypertension"  # fill by PH status
+  ) +
+  scale_fill_discrete( labels = c("No PH", "PH")) +  # rename 0&1 to "No PH"/"PH"
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5, face = "bold")  # Center and bold title
+  )
+
+ggsave(here("figures", "Figure 2.pdf"))
+```
+
+```{r}
+# Plot 3: Scatter plot between RVFWSL and MPAP
+library(ggpmisc)
+
+regression<- ggplot(data_clean, aes(x = rvfwsl, y = preavrtmpap, color = sex)) + #specifying which variables i want in plot
+  geom_point() +  # Scatter plot
+  geom_smooth(method = "lm", se = TRUE) +  # Adds regression line + 95% CI
+  labs(
+    x = "Right Ventricular Free Wall Strain", #re-labelling
+    y = "Mean PA Pressure (mmHg)",
+    color = "Sex",
+    title = "RV Free Wall Strain vs Mean PA Pressures"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  # Center and bold title)
+    
+regression
+
+ggsave(here("figures", "Figure 3.pdf"))
+```
+
+
+
+
+
+
+
